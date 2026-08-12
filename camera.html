@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111111">
+
+  <title>Event QR Scanner</title>
+
+  <script src="https://unpkg.com/html5-qrcode" defer></script>
+
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      text-align: center;
+      padding: 16px;
+      margin: 0;
+      background: #111;
+      color: white;
+    }
+
+    #scanner {
+      max-width: 500px;
+      margin: auto;
+    }
+
+    #reader {
+      width: 100%;
+      max-width: 500px;
+      margin: 20px auto;
+      background: white;
+      border-radius: 12px;
+      overflow: hidden;
+    }
+
+    #status {
+      margin: 15px 0;
+      padding: 15px;
+      border-radius: 10px;
+      font-size: 18px;
+      font-weight: bold;
+      background: #222;
+    }
+
+    .valid {
+      background: #1f7a3a !important;
+    }
+
+    .invalid {
+      background: #9b2525 !important;
+    }
+
+    .info {
+      background: #333 !important;
+    }
+
+    button {
+      font-size: 17px;
+      padding: 12px 22px;
+      border: 0;
+      border-radius: 8px;
+      margin: 8px;
+    }
+  </style>
+</head>
+
+<body>
+
+<div id="scanner">
+
+  <h1>Scan Wristband</h1>
+
+  <div id="status" class="info">
+    Starting camera...
+  </div>
+
+  <div id="reader"></div>
+
+  <button onclick="restartScanner()">RESTART CAMERA</button>
+
+</div>
+
+<script>
+  let scanner = null;
+  let processing = false;
+
+  // Tell the Apps Script parent that this camera page is ready.
+  function notifyReady() {
+    if (window.opener) {
+      window.opener.postMessage(
+        { type: "CAMERA_READY" },
+        "*"
+      );
+    }
+  }
+
+  function setStatus(message, className) {
+    const status = document.getElementById("status");
+    status.className = className || "info";
+    status.innerHTML = message;
+  }
+
+  function startCamera() {
+
+    if (typeof Html5Qrcode === "undefined") {
+      setTimeout(startCamera, 200);
+      return;
+    }
+
+    scanner = new Html5Qrcode("reader");
+
+    scanner.start(
+      { facingMode: "environment" },
+      {
+        fps: 10,
+        qrbox: {
+          width: 250,
+          height: 250
+        }
+      },
+      onScanSuccess
+    ).then(function() {
+
+      setStatus("Camera ready — scan a QR code.", "info");
+      notifyReady();
+
+    }).catch(function(error) {
+
+      console.error(error);
+
+      setStatus(
+        "Could not access the camera.<br><br>" +
+        "Please allow camera permission and reload this page.",
+        "invalid"
+      );
+    });
+  }
+
+
+  function onScanSuccess(decodedText) {
+
+    if (processing) {
+      return;
+    }
+
+    processing = true;
+
+    setStatus(
+      "QR detected.<br>Checking...",
+      "info"
+    );
+
+    // Pause scanning while the server checks the ticket.
+    try {
+      scanner.pause(true);
+    } catch (e) {}
+
+    if (window.opener) {
+
+      window.opener.postMessage(
+        {
+          type: "QR_SCANNED",
+          value: decodedText
+        },
+        "*"
+      );
+
+    } else {
+
+      setStatus(
+        "Scanner was not opened by the Event Check-In page.",
+        "invalid"
+      );
+
+      processing = false;
+    }
+  }
+
+
+  // Receive result from the Apps Script page.
+  window.addEventListener("message", function(event) {
+
+    // Only accept a result from the window that opened this scanner.
+    if (event.source !== window.opener) {
+      return;
+    }
+
+    const data = event.data || {};
+
+    if (data.type !== "SCAN_RESULT") {
+      return;
+    }
+
+    const response = data.response || {};
+
+    if (response.success) {
+
+      setStatus(
+        "✓ VALID<br><br>" +
+        escapeHtml(response.id || "") +
+        "<br><br>ENTRY / PAYMENT APPROVED",
+        "valid"
+      );
+
+    } else if (response.message === "UNAUTHORIZED") {
+
+      setStatus(
+        "✕ UNAUTHORIZED STAFF PIN",
+        "invalid"
+      );
+
+    } else if (response.status === "ALREADY USED") {
+
+      setStatus(
+        "✕ ALREADY USED<br><br>" +
+        escapeHtml(response.id || ""),
+        "invalid"
+      );
+
+    } else {
+
+      setStatus(
+        "✕ INVALID TICKET<br><br>" +
+        escapeHtml(response.id || ""),
+        "invalid"
+      );
+    }
+
+    // Allow another scan after 3 seconds.
+    setTimeout(function() {
+
+      processing = false;
+
+      setStatus(
+        "Ready for next QR code.",
+        "info"
+      );
+
+      try {
+        scanner.resume();
+      } catch (e) {}
+
+    }, 3000);
+  });
+
+
+  function restartScanner() {
+    location.reload();
+  }
+
+
+  function escapeHtml(value) {
+    return String(value)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+  }
+
+  window.addEventListener("load", startCamera);
+</script>
+
+</body>
+</html>
