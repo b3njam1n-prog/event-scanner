@@ -1,14 +1,20 @@
 <!DOCTYPE html>
 <html>
+
 <head>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#111111">
+
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1">
+
+  <meta name="theme-color"
+        content="#111111">
 
   <title>Event QR Scanner</title>
 
   <script src="https://unpkg.com/html5-qrcode" defer></script>
 
   <style>
+
     body {
       font-family: Arial, sans-serif;
       text-align: center;
@@ -39,6 +45,7 @@
       font-size: 18px;
       font-weight: bold;
       background: #222;
+      min-height: 28px;
     }
 
     .valid {
@@ -47,6 +54,10 @@
 
     .invalid {
       background: #9b2525 !important;
+    }
+
+    .warning {
+      background: #8a5a00 !important;
     }
 
     .info {
@@ -59,9 +70,19 @@
       border: 0;
       border-radius: 8px;
       margin: 8px;
+      cursor: pointer;
     }
+
+    #connection {
+      font-size: 14px;
+      margin-top: 5px;
+      opacity: 0.8;
+    }
+
   </style>
+
 </head>
+
 
 <body>
 
@@ -73,192 +94,863 @@
     Starting camera...
   </div>
 
+  <div id="connection">
+    Checking connection...
+  </div>
+
   <div id="reader"></div>
 
-  <button onclick="restartScanner()">RESTART CAMERA</button>
+  <button onclick="restartScanner()">
+    RESTART CAMERA
+  </button>
 
 </div>
 
+
 <script>
+
+  // =====================================================
+  // GLOBAL STATE
+  // =====================================================
+
   let scanner = null;
+
   let processing = false;
 
-  // Tell the Apps Script parent that this camera page is ready.
-  function notifyReady() {
-    if (window.opener) {
-      window.opener.postMessage(
-        { type: "CAMERA_READY" },
-        "*"
-      );
-    }
-  }
+  let waitingForResult = false;
+
+  let resultTimeout = null;
+
+  let lastScannedValue = "";
+
+  let lastScanTime = 0;
+
+  let scannerStarting = false;
+
+
+  // How long we wait for Apps Script before recovering.
+  const RESULT_TIMEOUT = 12000;
+
+  // Prevent the same QR from being processed repeatedly.
+  const DUPLICATE_SCAN_DELAY = 3000;
+
+
+  // =====================================================
+  // STATUS DISPLAY
+  // =====================================================
 
   function setStatus(message, className) {
-    const status = document.getElementById("status");
-    status.className = className || "info";
-    status.innerHTML = message;
+
+    const status =
+      document.getElementById("status");
+
+    status.className =
+      className || "info";
+
+    status.innerHTML =
+      message;
+
   }
+
+
+  // =====================================================
+  // CONNECTION STATUS
+  // =====================================================
+
+  function updateConnectionStatus() {
+
+    const connection =
+      document.getElementById("connection");
+
+    if (navigator.onLine) {
+
+      connection.innerHTML =
+        "🟢 Internet connection available";
+
+    } else {
+
+      connection.innerHTML =
+        "🔴 OFFLINE — scanning disabled";
+
+    }
+
+  }
+
+
+  window.addEventListener(
+    "online",
+    function() {
+
+      updateConnectionStatus();
+
+      if (!processing) {
+
+        setStatus(
+          "Internet restored — ready to scan.",
+          "info"
+        );
+
+      }
+
+    }
+  );
+
+
+  window.addEventListener(
+    "offline",
+    function() {
+
+      updateConnectionStatus();
+
+      setStatus(
+        "🔴 NO INTERNET CONNECTION<br><br>" +
+        "Scanning is temporarily disabled.",
+        "warning"
+      );
+
+    }
+  );
+
+
+  // =====================================================
+  // TELL APPS SCRIPT THAT CAMERA IS READY
+  // =====================================================
+
+  function notifyReady() {
+
+    if (window.opener) {
+
+      window.opener.postMessage(
+
+        {
+          type: "CAMERA_READY"
+        },
+
+        "*"
+
+      );
+
+    }
+
+  }
+
+
+  // =====================================================
+  // START CAMERA
+  // =====================================================
 
   function startCamera() {
 
-    if (typeof Html5Qrcode === "undefined") {
-      setTimeout(startCamera, 200);
+    if (scannerStarting) {
       return;
     }
 
-    scanner = new Html5Qrcode("reader");
+    scannerStarting = true;
+
+
+    if (
+      typeof Html5Qrcode ===
+      "undefined"
+    ) {
+
+      scannerStarting = false;
+
+      setTimeout(
+        startCamera,
+        300
+      );
+
+      return;
+
+    }
+
+
+    setStatus(
+      "Starting camera...",
+      "info"
+    );
+
+
+    scanner =
+      new Html5Qrcode("reader");
+
 
     scanner.start(
-      { facingMode: "environment" },
+
       {
-        fps: 10,
+        facingMode: "environment"
+      },
+
+      {
+        fps: 7,
+
         qrbox: {
           width: 250,
           height: 250
-        }
+        },
+
+        aspectRatio: 1.0
+
       },
+
       onScanSuccess
-    ).then(function() {
 
-      setStatus("Camera ready — scan a QR code.", "info");
-      notifyReady();
+    )
 
-    }).catch(function(error) {
+    .then(function() {
 
-      console.error(error);
+      scannerStarting = false;
 
       setStatus(
-        "Could not access the camera.<br><br>" +
-        "Please allow camera permission and reload this page.",
-        "invalid"
+        "Camera ready — scan a QR code.",
+        "info"
       );
+
+      updateConnectionStatus();
+
+      notifyReady();
+
+    })
+
+    .catch(function(error) {
+
+      scannerStarting = false;
+
+      console.error(
+        "Camera error:",
+        error
+      );
+
+      setStatus(
+
+        "❌ Could not access the camera.<br><br>" +
+
+        "Check camera permission and reload the page.",
+
+        "invalid"
+
+      );
+
     });
+
   }
 
 
+  // =====================================================
+  // QR SCAN
+  // =====================================================
+
   function onScanSuccess(decodedText) {
+
+
+    // -----------------------------------------------
+    // Don't process while another QR is being checked
+    // -----------------------------------------------
 
     if (processing) {
       return;
     }
 
+
+    // -----------------------------------------------
+    // Don't scan while offline
+    // -----------------------------------------------
+
+    if (!navigator.onLine) {
+
+      setStatus(
+
+        "🔴 NO INTERNET CONNECTION<br><br>" +
+        "Scanning disabled until connection returns.",
+
+        "warning"
+
+      );
+
+      return;
+
+    }
+
+
+    // -----------------------------------------------
+    // Duplicate QR protection
+    // -----------------------------------------------
+
+    const now =
+      Date.now();
+
+
+    if (
+
+      decodedText === lastScannedValue &&
+
+      now - lastScanTime <
+      DUPLICATE_SCAN_DELAY
+
+    ) {
+
+      return;
+
+    }
+
+
+    lastScannedValue =
+      decodedText;
+
+    lastScanTime =
+      now;
+
+
+    // -----------------------------------------------
+    // Begin processing
+    // -----------------------------------------------
+
     processing = true;
 
+    waitingForResult = true;
+
+
     setStatus(
-      "QR detected.<br>Checking...",
+
+      "QR detected.<br>" +
+      "Checking...",
+
       "info"
+
     );
 
-    // Pause scanning while the server checks the ticket.
+
+    // -----------------------------------------------
+    // Pause camera
+    // -----------------------------------------------
+
     try {
+
       scanner.pause(true);
-    } catch (e) {}
+
+    } catch (error) {
+
+      console.warn(
+        "Could not pause scanner:",
+        error
+      );
+
+    }
+
+
+    // -----------------------------------------------
+    // Send QR to Apps Script parent
+    // -----------------------------------------------
 
     if (window.opener) {
 
       window.opener.postMessage(
+
         {
           type: "QR_SCANNED",
           value: decodedText
         },
+
         "*"
+
       );
 
     } else {
 
+      waitingForResult =
+        false;
+
+      processing =
+        false;
+
+
       setStatus(
-        "Scanner was not opened by the Event Check-In page.",
+
+        "❌ Scanner was not opened " +
+        "from Event Check-In.",
+
         "invalid"
+
       );
 
-      processing = false;
+
+      recoverScanner();
+
+      return;
+
     }
+
+
+    // -----------------------------------------------
+    // WATCHDOG TIMER
+    //
+    // If Apps Script doesn't respond within 12 sec,
+    // automatically recover the scanner.
+    // -----------------------------------------------
+
+    clearTimeout(resultTimeout);
+
+
+    resultTimeout =
+      setTimeout(
+
+        function() {
+
+          if (!waitingForResult) {
+            return;
+          }
+
+
+          console.warn(
+            "Apps Script response timeout."
+          );
+
+
+          waitingForResult =
+            false;
+
+          processing =
+            false;
+
+
+          setStatus(
+
+            "⚠️ CONNECTION TIMEOUT<br><br>" +
+            "Please try scanning again.",
+
+            "warning"
+
+          );
+
+
+          recoverScanner();
+
+        },
+
+        RESULT_TIMEOUT
+
+      );
+
   }
 
 
-  // Receive result from the Apps Script page.
-  window.addEventListener("message", function(event) {
+  // =====================================================
+  // RECEIVE RESULT FROM APPS SCRIPT
+  // =====================================================
 
-    // Only accept a result from the window that opened this scanner.
-    if (event.source !== window.opener) {
-      return;
+  window.addEventListener(
+
+    "message",
+
+    function(event) {
+
+
+      // ---------------------------------------------
+      // Only accept messages from the opener
+      // ---------------------------------------------
+
+      if (
+        event.source !==
+        window.opener
+      ) {
+
+        return;
+
+      }
+
+
+      const data =
+        event.data || {};
+
+
+      if (
+        data.type !==
+        "SCAN_RESULT"
+      ) {
+
+        return;
+
+      }
+
+
+      // ---------------------------------------------
+      // Ignore late responses
+      //
+      // This prevents a delayed server response from
+      // interfering with the next scan.
+      // ---------------------------------------------
+
+      if (!waitingForResult) {
+
+        console.warn(
+          "Ignoring late scan result."
+        );
+
+        return;
+
+      }
+
+
+      waitingForResult =
+        false;
+
+
+      processing =
+        false;
+
+
+      clearTimeout(
+        resultTimeout
+      );
+
+
+      const response =
+        data.response || {};
+
+
+      // ---------------------------------------------
+      // SUCCESS
+      // ---------------------------------------------
+
+      if (response.success) {
+
+        setStatus(
+
+          "✓ VALID<br><br>" +
+
+          escapeHtml(
+            response.id || ""
+          ) +
+
+          "<br><br>" +
+
+          "ENTRY / PAYMENT APPROVED",
+
+          "valid"
+
+        );
+
+      }
+
+
+      // ---------------------------------------------
+      // UNAUTHORIZED
+      // ---------------------------------------------
+
+      else if (
+        response.message ===
+        "UNAUTHORIZED"
+      ) {
+
+        setStatus(
+
+          "✕ UNAUTHORIZED STAFF",
+
+          "invalid"
+
+        );
+
+      }
+
+
+      // ---------------------------------------------
+      // ALREADY USED
+      // ---------------------------------------------
+
+      else if (
+        response.status ===
+        "ALREADY USED"
+      ) {
+
+        setStatus(
+
+          "✕ ALREADY USED<br><br>" +
+
+          escapeHtml(
+            response.id || ""
+          ),
+
+          "invalid"
+
+        );
+
+      }
+
+
+      // ---------------------------------------------
+      // SYSTEM BUSY
+      // ---------------------------------------------
+
+      else if (
+        response.message ===
+        "SYSTEM_BUSY"
+      ) {
+
+        setStatus(
+
+          "⚠️ SYSTEM BUSY<br><br>" +
+          "Please try again.",
+
+          "warning"
+
+        );
+
+      }
+
+
+      // ---------------------------------------------
+      // SYSTEM ERROR
+      // ---------------------------------------------
+
+      else if (
+        response.message ===
+        "SYSTEM_ERROR"
+      ) {
+
+        setStatus(
+
+          "⚠️ SERVER ERROR<br><br>" +
+          "Please try again.",
+
+          "warning"
+
+        );
+
+      }
+
+
+      // ---------------------------------------------
+      // SHEET ERROR
+      // ---------------------------------------------
+
+      else if (
+        response.message ===
+        "SHEET_NOT_FOUND"
+      ) {
+
+        setStatus(
+
+          "⚠️ SYSTEM CONFIGURATION ERROR",
+
+          "invalid"
+
+        );
+
+      }
+
+
+      // ---------------------------------------------
+      // INVALID
+      // ---------------------------------------------
+
+      else {
+
+        setStatus(
+
+          "✕ INVALID TICKET<br><br>" +
+
+          escapeHtml(
+            response.id || ""
+          ),
+
+          "invalid"
+
+        );
+
+      }
+
+
+      // ---------------------------------------------
+      // Prepare for next scan
+      // ---------------------------------------------
+
+      setTimeout(
+
+        function() {
+
+          recoverScanner();
+
+        },
+
+        2500
+
+      );
+
     }
 
-    const data = event.data || {};
+  );
 
-    if (data.type !== "SCAN_RESULT") {
-      return;
-    }
 
-    const response = data.response || {};
+  // =====================================================
+  // RECOVER SCANNER
+  // =====================================================
 
-    if (response.success) {
+  function recoverScanner() {
 
-      setStatus(
-        "✓ VALID<br><br>" +
-        escapeHtml(response.id || "") +
-        "<br><br>ENTRY / PAYMENT APPROVED",
-        "valid"
-      );
+    clearTimeout(
+      resultTimeout
+    );
 
-    } else if (response.message === "UNAUTHORIZED") {
 
-      setStatus(
-        "✕ UNAUTHORIZED STAFF PIN",
-        "invalid"
-      );
+    waitingForResult =
+      false;
 
-    } else if (response.status === "ALREADY USED") {
+    processing =
+      false;
 
-      setStatus(
-        "✕ ALREADY USED<br><br>" +
-        escapeHtml(response.id || ""),
-        "invalid"
-      );
 
-    } else {
+    setStatus(
 
-      setStatus(
-        "✕ INVALID TICKET<br><br>" +
-        escapeHtml(response.id || ""),
-        "invalid"
-      );
-    }
+      "Ready for next QR code.",
 
-    // Allow another scan after 3 seconds.
-    setTimeout(function() {
+      "info"
 
-      processing = false;
+    );
 
-      setStatus(
-        "Ready for next QR code.",
-        "info"
-      );
 
-      try {
+    // Try to resume the existing scanner
+    try {
+
+      if (scanner) {
+
         scanner.resume();
-      } catch (e) {}
 
-    }, 3000);
-  });
+        return;
 
+      }
+
+    } catch (error) {
+
+      console.warn(
+        "Resume failed:",
+        error
+      );
+
+    }
+
+
+    // If resume fails, restart the page.
+    // This is the final recovery mechanism.
+    setTimeout(
+
+      function() {
+
+        location.reload();
+
+      },
+
+      500
+
+    );
+
+  }
+
+
+  // =====================================================
+  // MANUAL RESTART
+  // =====================================================
 
   function restartScanner() {
-    location.reload();
+
+    clearTimeout(
+      resultTimeout
+    );
+
+
+    processing =
+      false;
+
+    waitingForResult =
+      false;
+
+
+    try {
+
+      if (scanner) {
+
+        scanner.stop()
+
+          .then(function() {
+
+            location.reload();
+
+          })
+
+          .catch(function() {
+
+            location.reload();
+
+          });
+
+        return;
+
+      }
+
+    } catch (error) {
+
+      location.reload();
+
+    }
+
   }
 
+
+  // =====================================================
+  // SECURITY: ESCAPE DISPLAYED TEXT
+  // =====================================================
 
   function escapeHtml(value) {
+
     return String(value)
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;")
-      .replaceAll('"', "&quot;")
-      .replaceAll("'", "&#039;");
+
+      .replaceAll(
+        "&",
+        "&amp;"
+      )
+
+      .replaceAll(
+        "<",
+        "&lt;"
+      )
+
+      .replaceAll(
+        ">",
+        "&gt;"
+      )
+
+      .replaceAll(
+        '"',
+        "&quot;"
+      )
+
+      .replaceAll(
+        "'",
+        "&#039;"
+      );
+
   }
 
-  window.addEventListener("load", startCamera);
+
+  // =====================================================
+  // INITIALIZATION
+  // =====================================================
+
+  window.addEventListener(
+
+    "load",
+
+    function() {
+
+      updateConnectionStatus();
+
+      startCamera();
+
+    }
+
+  );
+
 </script>
 
 </body>
+
 </html>
